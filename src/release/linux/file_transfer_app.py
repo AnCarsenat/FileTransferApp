@@ -628,6 +628,7 @@ class FileTransferGUI:
         log_message(f"Network URL: http://{local_ip}:8080")
         log_message("Phone → Computer: Upload files from phone")
         log_message("Computer → Phone: Add files to share and download from phone")
+        log_message("⚠️ WARNING: Server accessible to anyone on your network. No authentication or HTTPS!")
     
     def stop_server(self):
         global server_running
