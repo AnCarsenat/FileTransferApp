@@ -1,241 +1,163 @@
-#!/usr/bin/env python3
-"""
-Phone File Transfer Desktop App
-A desktop application that hosts a web server for receiving files from mobile devices
-"""
-
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
-import threading
-import socket
 import os
-import sys
-from flask import Flask, request, render_template_string, redirect, url_for, flash
-from werkzeug.utils import secure_filename
-import webbrowser
+import socket
+import threading
+from flask import Flask, request, jsonify, send_file
+import tkinter as tk
+from tkinter import scrolledtext, filedialog, messagebox
 from datetime import datetime
-import json
 
-class FileTransferApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Phone File Transfer Server")
-        self.root.geometry("600x500")
-        self.root.resizable(True, True)
-        
-        # Server variables
-        self.flask_app = None
-        self.server_thread = None
-        self.is_running = False
-        self.port = 8080
-        self.download_folder = os.path.join(os.getcwd(), "downloads")
-        
-        # Ensure download folder exists
-        os.makedirs(self.download_folder, exist_ok=True)
-        
-        self.setup_ui()
-        self.setup_flask_app()
-        
-    def setup_ui(self):
-        """Setup the user interface"""
-        # Main frame
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        # Configure grid weights
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(4, weight=1)
-        
-        # Title
-        title_label = ttk.Label(main_frame, text="Phone File Transfer Server", 
-                               font=('Arial', 16, 'bold'))
-        title_label.grid(row=0, column=0, columnspan=2, pady=(0, 20))
-        
-        # Server settings frame
-        settings_frame = ttk.LabelFrame(main_frame, text="Server Settings", padding="10")
-        settings_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
-        settings_frame.columnconfigure(1, weight=1)
-        
-        # Port setting
-        ttk.Label(settings_frame, text="Port:").grid(row=0, column=0, sticky=tk.W)
-        self.port_var = tk.StringVar(value=str(self.port))
-        port_entry = ttk.Entry(settings_frame, textvariable=self.port_var, width=10)
-        port_entry.grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
-        
-        # Download folder setting
-        ttk.Label(settings_frame, text="Download Folder:").grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
-        folder_frame = ttk.Frame(settings_frame)
-        folder_frame.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=(5, 0))
-        folder_frame.columnconfigure(0, weight=1)
-        
-        self.folder_var = tk.StringVar(value=self.download_folder)
-        folder_entry = ttk.Entry(folder_frame, textvariable=self.folder_var, state='readonly')
-        folder_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(5, 5))
-        
-        browse_btn = ttk.Button(folder_frame, text="Browse", command=self.browse_folder)
-        browse_btn.grid(row=0, column=1)
-        
-        # Server control frame
-        control_frame = ttk.Frame(main_frame)
-        control_frame.grid(row=2, column=0, columnspan=2, pady=10)
-        
-        self.start_btn = ttk.Button(control_frame, text="Start Server", command=self.start_server)
-        self.start_btn.pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.stop_btn = ttk.Button(control_frame, text="Stop Server", command=self.stop_server, state='disabled')
-        self.stop_btn.pack(side=tk.LEFT, padx=5)
-        
-        self.open_browser_btn = ttk.Button(control_frame, text="Open in Browser", 
-                                          command=self.open_browser, state='disabled')
-        self.open_browser_btn.pack(side=tk.LEFT, padx=5)
-        
-        # Status frame
-        status_frame = ttk.LabelFrame(main_frame, text="Server Status", padding="10")
-        status_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
-        status_frame.columnconfigure(0, weight=1)
-        
-        self.status_label = ttk.Label(status_frame, text="Server is stopped", foreground="red")
-        self.status_label.grid(row=0, column=0, sticky=tk.W)
-        
-        self.url_label = ttk.Label(status_frame, text="", foreground="blue", cursor="hand2")
-        self.url_label.grid(row=1, column=0, sticky=tk.W)
-        self.url_label.bind("<Button-1>", lambda e: self.open_browser())
-        
-        # Log frame
-        log_frame = ttk.LabelFrame(main_frame, text="Activity Log", padding="10")
-        log_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S))
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
-        
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, state='disabled')
-        self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        clear_log_btn = ttk.Button(log_frame, text="Clear Log", command=self.clear_log)
-        clear_log_btn.grid(row=1, column=0, pady=(5, 0))
-        
-    def setup_flask_app(self):
-        """Setup Flask application"""
-        self.flask_app = Flask(__name__)
-        self.flask_app.secret_key = 'file_transfer_secret_key'
-        
-        # Simple HTML template for older phones - no console, AJAX uploads with progress
-        upload_template = '''
-        <!DOCTYPE html>
+app = Flask(__name__)
+
+# Configuration
+DOWNLOAD_FOLDER = os.path.join(os.getcwd(), 'downloads')
+UPLOAD_FOLDER = os.path.join(os.getcwd(), 'uploads')
+os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# Global variables
+log_widget = None
+server_thread = None
+server_running = False
+
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "127.0.0.1"
+
+def log_message(message):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_text = f"[{timestamp}] {message}\n"
+    if log_widget:
+        log_widget.insert(tk.END, log_text)
+        log_widget.see(tk.END)
+
+# Flask Routes
+@app.route('/')
+def index():
+    html = """<!DOCTYPE html>
 <html>
 <head>
-    <title>File Upload</title>
+    <title>File Transfer</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 10px;
-            background-color: #f0f0f0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            box-sizing: border-box;
+            padding: 10px;
         }
-        
-        * {
-            box-sizing: border-box;
-        }
-
         .container {
             max-width: 600px;
             margin: 0 auto;
             background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            overflow: hidden;
         }
-
-        h1 {
-            color: #333;
+        .header {
+            background: #4a5568;
+            color: white;
+            padding: 20px;
             text-align: center;
-            font-size: clamp(20px, 5vw, 24px);
-            margin-bottom: 20px;
         }
-
-        h2 {
-            color: #555;
-            font-size: clamp(16px, 4vw, 18px);
-            margin-top: 30px;
-            margin-bottom: 15px;
+        .header h1 {
+            font-size: clamp(20px, 5vw, 26px);
+            margin-bottom: 5px;
         }
-
-        .upload-section {
-            border: 2px solid #ddd;
+        .header p {
+            font-size: clamp(12px, 3vw, 14px);
+            opacity: 0.9;
+        }
+        .content { padding: 20px; }
+        .section {
+            margin-bottom: 25px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
             padding: 20px;
-            margin-bottom: 20px;
-            border-radius: 5px;
-            background-color: #fafafa;
+            background: #f8fafc;
         }
-
+        .section-title {
+            color: #2d3748;
+            font-size: clamp(16px, 4vw, 18px);
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .direction-badge {
+            font-size: clamp(10px, 2.5vw, 12px);
+            padding: 4px 8px;
+            border-radius: 4px;
+            background: #edf2f7;
+            color: #4a5568;
+            font-weight: normal;
+        }
         input[type="file"] {
             width: 100%;
             padding: 10px;
             font-size: clamp(14px, 3.5vw, 16px);
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            margin-bottom: 15px;
+            border: 1px solid #cbd5e0;
+            border-radius: 6px;
+            margin-bottom: 12px;
             background: white;
         }
-
         button {
-            background-color: #4CAF50;
-            color: white;
-            padding: 15px 20px;
+            width: 100%;
+            padding: 14px 20px;
             font-size: clamp(14px, 3.5vw, 16px);
             border: none;
-            border-radius: 4px;
+            border-radius: 6px;
             cursor: pointer;
-            width: 100%;
-            margin-top: 10px;
+            font-weight: 600;
+            transition: all 0.3s ease;
             min-height: 44px;
         }
-
-        button:hover {
-            background-color: #45a049;
+        .upload-btn {
+            background: #48bb78;
+            color: white;
         }
-
-        button:disabled {
-            background-color: #cccccc;
+        .upload-btn:hover { background: #38a169; }
+        .upload-btn:disabled {
+            background: #cbd5e0;
             cursor: not-allowed;
         }
-
+        .download-btn {
+            background: #4299e1;
+            color: white;
+            margin-top: 8px;
+        }
+        .download-btn:hover { background: #3182ce; }
+        .refresh-btn {
+            background: #ed8936;
+            color: white;
+            margin-bottom: 12px;
+        }
+        .refresh-btn:hover { background: #dd6b20; }
         .file-info {
-            background-color: #e8f4f8;
-            padding: 15px;
-            margin: 15px 0;
-            border-radius: 4px;
-            border: 1px solid #bee5eb;
+            background: #e6fffa;
+            padding: 12px;
+            margin: 12px 0;
+            border-radius: 6px;
+            border: 1px solid #81e6d9;
             display: none;
             font-size: clamp(12px, 3vw, 14px);
         }
-
-        .file-info.show {
-            display: block;
-        }
-
-        .file-list {
-            max-height: 150px;
-            overflow-y: auto;
-        }
-
+        .file-info.show { display: block; }
         .file-item {
-            padding: 5px 0;
-            border-bottom: 1px solid #ddd;
+            padding: 8px 0;
+            border-bottom: 1px solid #e2e8f0;
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-wrap: wrap;
         }
-
-        .file-item:last-child {
-            border-bottom: none;
-        }
-
+        .file-item:last-child { border-bottom: none; }
         .file-name {
             font-weight: bold;
             word-break: break-word;
@@ -243,256 +165,188 @@ class FileTransferApp:
             min-width: 120px;
             margin-right: 10px;
         }
-
         .file-size {
-            color: #666;
+            color: #718096;
             font-size: clamp(11px, 2.5vw, 12px);
             white-space: nowrap;
         }
-
         .message {
-            padding: 15px;
+            padding: 12px 16px;
             margin: 15px 0;
-            border-radius: 4px;
+            border-radius: 6px;
             font-size: clamp(13px, 3vw, 14px);
             text-align: center;
             display: none;
+            font-weight: 500;
         }
-
         .message.success {
-            background-color: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
+            background: #c6f6d5;
+            color: #22543d;
+            border: 1px solid #9ae6b4;
         }
-
         .message.error {
-            background-color: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
+            background: #fed7d7;
+            color: #742a2a;
+            border: 1px solid #fc8181;
         }
-
-        .message.show {
-            display: block;
-        }
-
+        .message.show { display: block; }
         .progress-container {
-            margin: 20px 0;
+            margin: 15px 0;
             display: none;
         }
-
-        .progress-container.show {
-            display: block;
-        }
-
+        .progress-container.show { display: block; }
         .progress-bar-bg {
             width: 100%;
-            background-color: #f0f0f0;
+            background: #e2e8f0;
             border-radius: 10px;
             overflow: hidden;
-            height: 25px;
+            height: 28px;
             position: relative;
             margin-bottom: 10px;
         }
-
         .progress-bar {
             height: 100%;
-            background-color: #4CAF50;
+            background: linear-gradient(90deg, #48bb78, #38a169);
             width: 0%;
             transition: width 0.3s ease;
-            display: flex;
-            align-items: center;
-            justify-content: center;
             position: relative;
         }
-
         .progress-text {
             position: absolute;
             width: 100%;
+            top: 50%;
+            left: 0;
+            transform: translateY(-50%);
             text-align: center;
-            color: #333;
+            color: #2d3748;
             font-weight: bold;
-            font-size: clamp(11px, 2.8vw, 12px);
+            font-size: clamp(11px, 2.8vw, 13px);
             z-index: 1;
         }
-
         .progress-info {
             display: flex;
             justify-content: space-between;
             font-size: clamp(11px, 2.5vw, 12px);
-            color: #666;
+            color: #718096;
             flex-wrap: wrap;
             gap: 10px;
         }
-
-        /* Mobile optimizations */
+        .available-files {
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            background: white;
+        }
+        .available-file {
+            padding: 12px;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+        .available-file:last-child { border-bottom: none; }
+        .available-file:hover { background: #f7fafc; }
+        .no-files {
+            padding: 20px;
+            text-align: center;
+            color: #a0aec0;
+            font-style: italic;
+        }
         @media screen and (max-width: 480px) {
-            body {
-                padding: 5px;
-            }
-            
-            .container {
-                padding: 15px;
-                margin: 0;
-                border-radius: 0;
-            }
-            
-            .upload-section {
-                padding: 15px;
-                margin-bottom: 15px;
-            }
-            
-            h1 {
-                margin-bottom: 15px;
-            }
-            
-            h2 {
-                margin-top: 20px;
-                margin-bottom: 10px;
-            }
-            
-            .progress-info {
-                flex-direction: column;
-                align-items: flex-start;
-                gap: 5px;
-            }
-            
-            .file-item {
-                flex-direction: column;
-                align-items: flex-start;
-                gap: 3px;
-            }
-            
-            .file-name {
-                margin-right: 0;
-                min-width: auto;
-            }
+            body { padding: 5px; }
+            .container { border-radius: 8px; }
+            .content { padding: 15px; }
+            .section { padding: 15px; }
+            .progress-info { flex-direction: column; gap: 5px; }
         }
-
-        /* Very small screens */
         @media screen and (max-width: 320px) {
-            .container {
-                padding: 10px;
-            }
-            
-            .upload-section {
-                padding: 10px;
-            }
-            
-            button {
-                padding: 12px 15px;
-            }
-            
-            input[type="file"] {
-                padding: 8px;
-            }
+            .content { padding: 12px; }
+            .section { padding: 12px; }
         }
-
-        /* Large screens */
-        @media screen and (min-width: 768px) {
-            body {
-                padding: 20px;
-            }
-            
-            .progress-info {
-                justify-content: center;
-                gap: 20px;
-            }
-        }
-
-        /* Touch device optimizations */
         @media (pointer: coarse) {
-            button {
-                min-height: 48px;
-                padding: 15px 20px;
-            }
-            
-            input[type="file"] {
-                min-height: 44px;
-                padding: 12px;
-            }
+            button { min-height: 48px; }
+            input[type="file"] { min-height: 44px; }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>📱 File Upload</h1>
-        
-        <div id="message" class="message"></div>
-        
-        <!-- Single File Upload -->
-        <div class="upload-section">
-            <h2>Single File Upload</h2>
-            <form id="singleForm">
-                <input type="file" id="singleFile">
-                <div id="singleInfo" class="file-info"></div>
-                <button type="submit" disabled>Upload File</button>
-            </form>
+        <div class="header">
+            <h1>📱💻 File Transfer</h1>
+            <p>Transfer files between devices</p>
         </div>
-        
-        <!-- Multiple Files Upload -->
-        <div class="upload-section">
-            <h2>Multiple Files Upload</h2>
-            <form id="multiForm">
-                <input type="file" id="multiFiles" multiple>
-                <div id="multiInfo" class="file-info"></div>
-                <button type="submit" disabled>Upload Files</button>
-            </form>
-        </div>
-        
-        <!-- Progress Container -->
-        <div id="progressContainer" class="progress-container">
-            <div class="progress-bar-bg">
-                <div id="progressBar" class="progress-bar"></div>
-                <div id="progressText" class="progress-text">0%</div>
+        <div class="content">
+            <div id="message" class="message"></div>
+            <div class="section">
+                <div class="section-title">
+                    📤 Send to Computer
+                    <span class="direction-badge">Phone → Computer</span>
+                </div>
+                <form id="singleForm">
+                    <input type="file" id="singleFile">
+                    <div id="singleInfo" class="file-info"></div>
+                    <button type="submit" class="upload-btn" disabled>Upload File</button>
+                </form>
+                <div style="margin-top: 20px;">
+                    <form id="multiForm">
+                        <input type="file" id="multiFiles" multiple>
+                        <div id="multiInfo" class="file-info"></div>
+                        <button type="submit" class="upload-btn" disabled>Upload Multiple Files</button>
+                    </form>
+                </div>
             </div>
-            <div class="progress-info">
-                <span id="progressSize">0 MB / 0 MB</span>
-                <span id="progressTime">Elapsed: 0s</span>
-                <span id="progressEta">ETA: --</span>
+            <div class="section">
+                <div class="section-title">
+                    📥 Get from Computer
+                    <span class="direction-badge">Computer → Phone</span>
+                </div>
+                <button class="refresh-btn" id="refreshBtn">🔄 Refresh File List</button>
+                <div id="availableFiles" class="available-files">
+                    <div class="no-files">Loading files...</div>
+                </div>
+            </div>
+            <div id="progressContainer" class="progress-container">
+                <div class="progress-bar-bg">
+                    <div id="progressBar" class="progress-bar"></div>
+                    <div id="progressText" class="progress-text">0%</div>
+                </div>
+                <div class="progress-info">
+                    <span id="progressSize">0 MB / 0 MB</span>
+                    <span id="progressTime">Elapsed: 0s</span>
+                    <span id="progressEta">ETA: --</span>
+                </div>
             </div>
         </div>
     </div>
-
     <script>
-        let uploadStartTime = 0;
-        
+        var uploadStartTime = 0;
         function formatFileSize(bytes) {
             if (bytes === 0) return '0 B';
-            const k = 1024;
-            const sizes = ['B', 'KB', 'MB', 'GB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            var k = 1024;
+            var sizes = ['B', 'KB', 'MB', 'GB'];
+            var i = Math.floor(Math.log(bytes) / Math.log(k));
             return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
         }
-        
         function formatTime(seconds) {
             if (seconds < 60) return Math.round(seconds) + 's';
-            const minutes = Math.floor(seconds / 60);
-            const secs = Math.round(seconds % 60);
+            var minutes = Math.floor(seconds / 60);
+            var secs = Math.round(seconds % 60);
             return minutes + 'm ' + secs + 's';
         }
-        
         function showMessage(text, type) {
-            const message = document.getElementById('message');
+            var message = document.getElementById('message');
             message.textContent = text;
             message.className = 'message ' + type + ' show';
-            setTimeout(() => {
-                message.classList.remove('show');
-            }, 5000);
+            setTimeout(function() { message.classList.remove('show'); }, 5000);
         }
-        
-        // Single file selection
         document.getElementById('singleFile').addEventListener('change', function(e) {
-            const file = e.target.files[0];
-            const info = document.getElementById('singleInfo');
-            const btn = document.querySelector('#singleForm button');
-            
+            var file = e.target.files[0];
+            var info = document.getElementById('singleInfo');
+            var btn = document.querySelector('#singleForm button');
             if (file) {
-                info.innerHTML = `
-                    <div class="file-item">
-                        <span class="file-name">${file.name}</span>
-                        <span class="file-size">${formatFileSize(file.size)}</span>
-                    </div>
-                `;
+                info.innerHTML = '<div class="file-item"><span class="file-name">' + file.name + '</span><span class="file-size">' + formatFileSize(file.size) + '</span></div>';
                 info.classList.add('show');
                 btn.disabled = false;
             } else {
@@ -500,38 +354,19 @@ class FileTransferApp:
                 btn.disabled = true;
             }
         });
-        
-        // Multiple files selection
         document.getElementById('multiFiles').addEventListener('change', function(e) {
-            const files = Array.from(e.target.files);
-            const info = document.getElementById('multiInfo');
-            const btn = document.querySelector('#multiForm button');
-            
+            var files = Array.from(e.target.files);
+            var info = document.getElementById('multiInfo');
+            var btn = document.querySelector('#multiForm button');
             if (files.length > 0) {
-                const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-                let html = `<strong>Total: ${files.length} files (${formatFileSize(totalSize)})</strong><br><br>`;
-                
-                if (files.length <= 3) {
-                    files.forEach(file => {
-                        html += `
-                            <div class="file-item">
-                                <span class="file-name">${file.name}</span>
-                                <span class="file-size">${formatFileSize(file.size)}</span>
-                            </div>
-                        `;
-                    });
-                } else {
-                    files.slice(0, 3).forEach(file => {
-                        html += `
-                            <div class="file-item">
-                                <span class="file-name">${file.name}</span>
-                                <span class="file-size">${formatFileSize(file.size)}</span>
-                            </div>
-                        `;
-                    });
-                    html += `<div style="text-align: center; margin-top: 10px; color: #666;">...and ${files.length - 3} more files</div>`;
+                var totalSize = files.reduce(function(sum, file) { return sum + file.size; }, 0);
+                var html = '<strong>Total: ' + files.length + ' files (' + formatFileSize(totalSize) + ')</strong><br><br>';
+                files.slice(0, 3).forEach(function(file) {
+                    html += '<div class="file-item"><span class="file-name">' + file.name + '</span><span class="file-size">' + formatFileSize(file.size) + '</span></div>';
+                });
+                if (files.length > 3) {
+                    html += '<div style="text-align: center; margin-top: 10px; color: #666;">...and ' + (files.length - 3) + ' more files</div>';
                 }
-                
                 info.innerHTML = html;
                 info.classList.add('show');
                 btn.disabled = false;
@@ -540,27 +375,22 @@ class FileTransferApp:
                 btn.disabled = true;
             }
         });
-        
         function uploadFiles(formData, fileCount) {
-            const progressContainer = document.getElementById('progressContainer');
-            const progressBar = document.getElementById('progressBar');
-            const progressText = document.getElementById('progressText');
-            const progressSize = document.getElementById('progressSize');
-            const progressTime = document.getElementById('progressTime');
-            const progressEta = document.getElementById('progressEta');
-            
+            var progressContainer = document.getElementById('progressContainer');
+            var progressBar = document.getElementById('progressBar');
+            var progressText = document.getElementById('progressText');
+            var progressSize = document.getElementById('progressSize');
+            var progressTime = document.getElementById('progressTime');
+            var progressEta = document.getElementById('progressEta');
             progressContainer.classList.add('show');
             uploadStartTime = Date.now();
-            
-            const xhr = new XMLHttpRequest();
-            
+            var xhr = new XMLHttpRequest();
             xhr.upload.addEventListener('progress', function(e) {
                 if (e.lengthComputable) {
-                    const percent = Math.round((e.loaded / e.total) * 100);
-                    const elapsed = (Date.now() - uploadStartTime) / 1000;
-                    const speed = e.loaded / elapsed;
-                    const remaining = (e.total - e.loaded) / speed;
-                    
+                    var percent = Math.round((e.loaded / e.total) * 100);
+                    var elapsed = (Date.now() - uploadStartTime) / 1000;
+                    var speed = e.loaded / elapsed;
+                    var remaining = (e.total - e.loaded) / speed;
                     progressBar.style.width = percent + '%';
                     progressText.textContent = percent + '%';
                     progressSize.textContent = formatFileSize(e.loaded) + ' / ' + formatFileSize(e.total);
@@ -568,7 +398,6 @@ class FileTransferApp:
                     progressEta.textContent = remaining > 0 ? 'ETA: ' + formatTime(remaining) : 'ETA: --';
                 }
             });
-            
             xhr.addEventListener('load', function() {
                 progressContainer.classList.remove('show');
                 if (xhr.status === 200) {
@@ -583,213 +412,237 @@ class FileTransferApp:
                     showMessage('Upload failed. Please try again.', 'error');
                 }
             });
-            
             xhr.addEventListener('error', function() {
                 progressContainer.classList.remove('show');
                 showMessage('Upload failed. Check your connection.', 'error');
             });
-            
             xhr.open('POST', '/upload');
             xhr.send(formData);
         }
-        
-        // Form submissions
         document.getElementById('singleForm').addEventListener('submit', function(e) {
             e.preventDefault();
-            const file = document.getElementById('singleFile').files[0];
+            var file = document.getElementById('singleFile').files[0];
             if (file) {
-                const formData = new FormData();
+                var formData = new FormData();
                 formData.append('files', file);
                 uploadFiles(formData, 1);
             }
         });
-        
         document.getElementById('multiForm').addEventListener('submit', function(e) {
             e.preventDefault();
-            const files = document.getElementById('multiFiles').files;
+            var files = document.getElementById('multiFiles').files;
             if (files.length > 0) {
-                const formData = new FormData();
-                for (let file of files) {
-                    formData.append('files', file);
+                var formData = new FormData();
+                for (var i = 0; i < files.length; i++) {
+                    formData.append('files', files[i]);
                 }
                 uploadFiles(formData, files.length);
             }
         });
+        function refreshFileList() {
+            fetch('/list_files').then(function(response) {
+                return response.json();
+            }).then(function(data) {
+                var container = document.getElementById('availableFiles');
+                if (data.files.length === 0) {
+                    container.innerHTML = '<div class="no-files">No files available for download</div>';
+                } else {
+                    var html = '';
+                    data.files.forEach(function(file) {
+                        html += '<div class="available-file"><div><div class="file-name">' + file.name + '</div><div class="file-size">' + formatFileSize(file.size) + '</div></div><button class="download-btn" data-filename="' + encodeURIComponent(file.name) + '">⬇️ Download</button></div>';
+                    });
+                    container.innerHTML = html;
+                    var downloadButtons = container.querySelectorAll('.download-btn');
+                    for (var i = 0; i < downloadButtons.length; i++) {
+                        downloadButtons[i].addEventListener('click', function() {
+                            var filename = this.getAttribute('data-filename');
+                            window.location.href = '/download/' + filename;
+                            showMessage('Downloading ' + decodeURIComponent(filename) + '...', 'success');
+                        });
+                    }
+                }
+            }).catch(function() {
+                showMessage('Failed to load file list', 'error');
+            });
+        }
+        document.getElementById('refreshBtn').addEventListener('click', refreshFileList);
+        refreshFileList();
     </script>
 </body>
-</html>
-        '''
-        
-        @self.flask_app.route('/')
-        def index():
-            return render_template_string(upload_template)
-        
-        @self.flask_app.route('/upload', methods=['POST'])
-        def upload_file():
-            try:
-                if 'files' not in request.files:
-                    return 'No file selected', 400
-                
-                files = request.files.getlist('files')
-                uploaded_files = []
-                total_size = 0
-                
-                for file in files:
-                    if file.filename == '':
-                        continue
-                    
-                    if file:
-                        filename = secure_filename(file.filename)
-                        # Add timestamp to prevent overwrites
-                        name, ext = os.path.splitext(filename)
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        filename = f"{name}_{timestamp}{ext}"
-                        
-                        filepath = os.path.join(self.download_folder, filename)
-                        file.save(filepath)
-                        file_size = os.path.getsize(filepath)
-                        total_size += file_size
-                        uploaded_files.append(filename)
-                        
-                        # Log the upload
-                        self.log_message(f"File uploaded: {filename} ({self.get_file_size(filepath)})")
-                
-                if uploaded_files:
-                    if len(uploaded_files) == 1:
-                        message = f"Successfully uploaded: {uploaded_files[0]}"
-                    else:
-                        total_size_str = self.get_file_size_from_bytes(total_size)
-                        message = f"Successfully uploaded {len(uploaded_files)} files ({total_size_str})"
-                    
-                    self.log_message(f"Upload completed: {len(uploaded_files)} files, {self.get_file_size_from_bytes(total_size)}")
-                    return 'Upload successful', 200
-                else:
-                    return 'No valid files uploaded', 400
-                    
-            except Exception as e:
-                self.log_message(f"Upload error: {str(e)}")
-                return f'Upload failed: {str(e)}', 500    
+</html>"""
+    return html
 
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    try:
+        files = request.files.getlist('files')
+        if not files:
+            return jsonify({'error': 'No files provided'}), 400
+        
+        for file in files:
+            if file.filename:
+                filepath = os.path.join(DOWNLOAD_FOLDER, file.filename)
+                file.save(filepath)
+                log_message(f"Received: {file.filename}")
+        
+        return jsonify({'success': True, 'count': len(files)}), 200
+    except Exception as e:
+        log_message(f"Upload error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/list_files', methods=['GET'])
+def list_files():
+    try:
+        files = []
+        for filename in os.listdir(UPLOAD_FOLDER):
+            filepath = os.path.join(UPLOAD_FOLDER, filename)
+            if os.path.isfile(filepath):
+                files.append({
+                    'name': filename,
+                    'size': os.path.getsize(filepath)
+                })
+        return jsonify({'files': files})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/download/<filename>')
+def download_file(filename):
+    try:
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        log_message(f"Sent: {filename}")
+        return send_file(filepath, as_attachment=True)
+    except Exception as e:
+        log_message(f"Download error: {str(e)}")
+        return jsonify({'error': 'File not found'}), 404
+
+# GUI Application
+class FileTransferGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("File Transfer Server")
+        self.root.geometry("600x500")
+        
+        title = tk.Label(root, text="📱💻 Bidirectional File Transfer", 
+                        font=("Arial", 16, "bold"), pady=10)
+        title.pack()
+        
+        control_frame = tk.Frame(root)
+        control_frame.pack(pady=10, padx=20, fill=tk.X)
+        
+        self.start_button = tk.Button(control_frame, text="▶️ Start Server", 
+                                      command=self.start_server, 
+                                      bg="#4CAF50", fg="white", 
+                                      font=("Arial", 12, "bold"), 
+                                      padx=20, pady=10)
+        self.start_button.pack(side=tk.LEFT, padx=5)
+        
+        self.stop_button = tk.Button(control_frame, text="⏹️ Stop Server", 
+                                     command=self.stop_server, 
+                                     bg="#f44336", fg="white", 
+                                     font=("Arial", 12, "bold"), 
+                                     padx=20, pady=10, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=5)
+        
+        self.upload_button = tk.Button(control_frame, text="📤 Add Files to Share", 
+                                       command=self.select_files_to_share,
+                                       bg="#2196F3", fg="white",
+                                       font=("Arial", 12, "bold"),
+                                       padx=20, pady=10)
+        self.upload_button.pack(side=tk.LEFT, padx=5)
+        
+        status_frame = tk.LabelFrame(root, text="Server Status", 
+                                    font=("Arial", 10, "bold"), padx=10, pady=10)
+        status_frame.pack(pady=10, padx=20, fill=tk.BOTH)
+        
+        tk.Label(status_frame, text="Local:", font=("Arial", 10)).grid(row=0, column=0, sticky=tk.W)
+        self.local_label = tk.Label(status_frame, text="Not running", 
+                                    font=("Arial", 10, "bold"), fg="red")
+        self.local_label.grid(row=0, column=1, sticky=tk.W, padx=10)
+        
+        tk.Label(status_frame, text="Network:", font=("Arial", 10)).grid(row=1, column=0, sticky=tk.W)
+        self.network_label = tk.Label(status_frame, text="Not running", 
+                                      font=("Arial", 10, "bold"), fg="red")
+        self.network_label.grid(row=1, column=1, sticky=tk.W, padx=10)
+        
+        info_frame = tk.LabelFrame(root, text="Folder Locations", 
+                                  font=("Arial", 10, "bold"), padx=10, pady=10)
+        info_frame.pack(pady=10, padx=20, fill=tk.BOTH)
+        
+        tk.Label(info_frame, text="📥 Received files:", font=("Arial", 9)).grid(row=0, column=0, sticky=tk.W)
+        tk.Label(info_frame, text=DOWNLOAD_FOLDER, font=("Arial", 9), fg="blue").grid(row=0, column=1, sticky=tk.W, padx=5)
+        
+        tk.Label(info_frame, text="📤 Shared files:", font=("Arial", 9)).grid(row=1, column=0, sticky=tk.W)
+        tk.Label(info_frame, text=UPLOAD_FOLDER, font=("Arial", 9), fg="blue").grid(row=1, column=1, sticky=tk.W, padx=5)
+        
+        log_frame = tk.LabelFrame(root, text="Activity Log", 
+                                 font=("Arial", 10, "bold"), padx=10, pady=10)
+        log_frame.pack(pady=10, padx=20, fill=tk.BOTH, expand=True)
+        
+        global log_widget
+        log_widget = scrolledtext.ScrolledText(log_frame, height=10, 
+                                               font=("Courier", 9))
+        log_widget.pack(fill=tk.BOTH, expand=True)
+        
+        log_message("Application started")
+        log_message(f"Received files folder: {DOWNLOAD_FOLDER}")
+        log_message(f"Shared files folder: {UPLOAD_FOLDER}")
     
-    def get_local_ip(self):
-        """Get the local IP address"""
-        try:
-            # Connect to a remote address to get local IP
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.connect(("8.8.8.8", 80))
-                return s.getsockname()[0]
-        except:
-            return "127.0.0.1"
-    
-    def get_file_size_from_bytes(self, size_bytes):
-        """Get human readable file size from bytes"""
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if size_bytes < 1024.0:
-                return f"{size_bytes:.1f} {unit}"
-            size_bytes /= 1024.0
-        return f"{size_bytes:.1f} TB"
-    
-    def get_file_size(self, filepath):
-        """Get human readable file size"""
-        size = os.path.getsize(filepath)
-        return self.get_file_size_from_bytes(size)
-    
-    def browse_folder(self):
-        """Browse for download folder"""
-        folder = filedialog.askdirectory(initialdir=self.download_folder)
-        if folder:
-            self.download_folder = folder
-            self.folder_var.set(folder)
+    def select_files_to_share(self):
+        files = filedialog.askopenfilenames(title="Select files to share with phone")
+        if files:
+            count = 0
+            for filepath in files:
+                try:
+                    filename = os.path.basename(filepath)
+                    dest_path = os.path.join(UPLOAD_FOLDER, filename)
+                    
+                    import shutil
+                    shutil.copy2(filepath, dest_path)
+                    log_message(f"Added to share: {filename}")
+                    count += 1
+                except Exception as e:
+                    log_message(f"Error adding {filename}: {str(e)}")
+            
+            if count > 0:
+                messagebox.showinfo("Success", f"Added {count} file(s) to share folder")
     
     def start_server(self):
-        """Start the Flask server"""
-        try:
-            self.port = int(self.port_var.get())
-            self.download_folder = self.folder_var.get()
-            
-            # Ensure download folder exists
-            os.makedirs(self.download_folder, exist_ok=True)
-            
-            # Start server in a separate thread
-            self.server_thread = threading.Thread(target=self.run_server, daemon=True)
-            self.server_thread.start()
-            
-            # Update UI
-            self.start_btn.config(state='disabled')
-            self.stop_btn.config(state='normal')
-            self.open_browser_btn.config(state='normal')
-            
-            local_ip = self.get_local_ip()
-            self.status_label.config(text=f"Server is running on port {self.port}", foreground="green")
-            self.url_label.config(text=f"Local: http://localhost:{self.port}\nNetwork: http://{local_ip}:{self.port}")
-            
-            self.log_message(f"Server started on port {self.port}")
-            self.log_message(f"Download folder: {self.download_folder}")
-            self.log_message(f"Access from phone: http://{local_ip}:{self.port}")
-            
-        except ValueError:
-            messagebox.showerror("Error", "Please enter a valid port number")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to start server: {str(e)}")
-    
-    def run_server(self):
-        """Run the Flask server"""
-        try:
-            self.is_running = True
-            self.flask_app.run(host='0.0.0.0', port=self.port, debug=False, use_reloader=False)
-        except Exception as e:
-            self.log_message(f"Server error: {str(e)}")
-            self.is_running = False
+        global server_running, server_thread
+        
+        def run_server():
+            app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+        
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        server_running = True
+        
+        local_ip = get_local_ip()
+        self.local_label.config(text=f"http://localhost:8080", fg="green")
+        self.network_label.config(text=f"http://{local_ip}:8080", fg="green")
+        
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        
+        log_message("Server started successfully")
+        log_message(f"Local URL: http://localhost:8080")
+        log_message(f"Network URL: http://{local_ip}:8080")
+        log_message("Phone → Computer: Upload files from phone")
+        log_message("Computer → Phone: Add files to share and download from phone")
     
     def stop_server(self):
-        """Stop the Flask server"""
-        self.is_running = False
+        global server_running
+        server_running = False
         
-        # Update UI
-        self.start_btn.config(state='normal')
-        self.stop_btn.config(state='disabled')
-        self.open_browser_btn.config(state='disabled')
-        self.status_label.config(text="Server is stopped", foreground="red")
-        self.url_label.config(text="")
+        self.local_label.config(text="Not running", fg="red")
+        self.network_label.config(text="Not running", fg="red")
         
-        self.log_message("Server stopped")
+        self.start_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
         
-        # Note: Flask development server doesn't have a clean shutdown method
-        # In a production app, you'd want to use a proper WSGI server like Waitress
-    
-    def open_browser(self):
-        """Open the web interface in default browser"""
-        if self.is_running:
-            webbrowser.open(f"http://localhost:{self.port}")
-    
-    def log_message(self, message):
-        """Add a message to the log"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        log_entry = f"[{timestamp}] {message}\n"
-        
-        self.log_text.config(state='normal')
-        self.log_text.insert(tk.END, log_entry)
-        self.log_text.see(tk.END)
-        self.log_text.config(state='disabled')
-    
-    def clear_log(self):
-        """Clear the log"""
-        self.log_text.config(state='normal')
-        self.log_text.delete(1.0, tk.END)
-        self.log_text.config(state='disabled')
-
-def main():
-    root = tk.Tk()
-    app = FileTransferApp(root)
-    
-    # Handle window closing
-    def on_closing():
-        if app.is_running:
-            app.stop_server()
-        root.destroy()
-    
-    root.protocol("WM_DELETE_WINDOW", on_closing)
-    root.mainloop()
+        log_message("Server stopped")
+        messagebox.showinfo("Info", "Please restart the application to start the server again")
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app_gui = FileTransferGUI(root)
+    root.mainloop()
